@@ -1,0 +1,235 @@
+# US#53 - GitLab CI Template para Risk Gate
+# 
+# Este template valida Merge Requests usando o backoffice-alerta como gate de risco.
+#
+# Comportamento:
+# - exitCode 0 (APROVADO) → Pipeline continua
+# - exitCode 1 (APROVADO_COM_RESTRICOES) → Warning, pipeline continua
+# - exitCode 2 (BLOQUEADO) → Pipeline falha
+#
+# Configuração necessária:
+# 1. CI/CD Variables no GitLab:
+#    - BACKOFFICE_ALERTA_URL: URL da API (ex: https://alerta.company.com)
+#    - BACKOFFICE_ALERTA_TOKEN: JWT token para autenticação (masked)
+#    - GITLAB_TOKEN: Personal Access Token do GitLab (masked)
+#
+# 2. Variáveis de ambiente no backoffice-alerta:
+#    - GITLAB_TOKEN: Personal Access Token do GitLab (para leitura de MRs)
+#
+# Como usar:
+# 1. Adicione este arquivo ao seu repositório como .gitlab-ci.yml
+# 2. Ou inclua no seu .gitlab-ci.yml existente:
+#    include:
+#      - local: '/cicd/gitlab-ci-template.yml'
+
+stages:
+  - risk-gate
+
+variables:
+  # Configurações padrão (podem ser sobrescritas)
+  RISK_GATE_FAIL_ON_BLOCK: "true"
+  RISK_GATE_WARN_ON_RESTRICTIONS: "true"
+
+.risk-gate-base:
+  stage: risk-gate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  only:
+    - merge_requests
+  artifacts:
+    reports:
+      dotenv: risk-gate.env
+    paths:
+      - risk-gate-response.json
+    expire_in: 30 days
+
+risk-gate:production:
+  extends: .risk-gate-base
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master"'
+  variables:
+    RISK_ENVIRONMENT: "PRODUCTION"
+  script:
+    - |
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "🔍 RISK GATE ANALYSIS (PRODUCTION)"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "Repository: $CI_PROJECT_PATH"
+      echo "MR Number: $CI_MERGE_REQUEST_IID"
+      echo "Target Branch: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      echo ""
+      
+      # Determina tipo de mudança baseado no título do MR
+      MR_TITLE="$CI_MERGE_REQUEST_TITLE"
+      if [[ "$MR_TITLE" == hotfix:* || "$MR_TITLE" == fix:* ]]; then
+        CHANGE_TYPE="HOTFIX"
+      elif [[ "$MR_TITLE" == feat:* || "$MR_TITLE" == feature:* ]]; then
+        CHANGE_TYPE="FEATURE"
+      elif [[ "$MR_TITLE" == refactor:* ]]; then
+        CHANGE_TYPE="REFACTOR"
+      else
+        CHANGE_TYPE="FEATURE"
+      fi
+      
+      echo "Change Type: $CHANGE_TYPE"
+      echo ""
+      
+      # Chama API do backoffice-alerta
+      HTTP_CODE=$(curl -s -w "%{http_code}" -o risk-gate-response.json \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $BACKOFFICE_ALERTA_TOKEN" \
+        -d "{
+          \"provider\": \"GITLAB\",
+          \"repositoryUrl\": \"$CI_PROJECT_URL\",
+          \"pullRequestNumber\": \"$CI_MERGE_REQUEST_IID\",
+          \"environment\": \"$RISK_ENVIRONMENT\",
+          \"changeType\": \"$CHANGE_TYPE\"
+        }" \
+        "$BACKOFFICE_ALERTA_URL/risk/ci/gate")
+      
+      # Verifica se request foi bem sucedida
+      if [[ "$HTTP_CODE" != "200" ]]; then
+        echo "❌ Erro ao chamar API: HTTP $HTTP_CODE"
+        cat risk-gate-response.json || echo "No response body"
+        exit 1
+      fi
+      
+      # Extrai dados da resposta
+      EXIT_CODE=$(jq -r '.exitCode' risk-gate-response.json)
+      DECISION=$(jq -r '.finalDecision' risk-gate-response.json)
+      RISK=$(jq -r '.overallRiskLevel' risk-gate-response.json)
+      SUMMARY=$(jq -r '.summary' risk-gate-response.json)
+      
+      echo "Decision: $DECISION"
+      echo "Risk Level: $RISK"
+      echo "Exit Code: $EXIT_CODE"
+      echo ""
+      echo "Summary:"
+      echo "$SUMMARY"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      # Mostra ações requeridas
+      ACTIONS=$(jq -r '.actionsRequired[]?' risk-gate-response.json 2>/dev/null || true)
+      if [[ -n "$ACTIONS" ]]; then
+        echo ""
+        echo "⚠️ Actions Required:"
+        echo "$ACTIONS" | while read line; do
+          echo "  - $line"
+        done
+        echo ""
+      fi
+      
+      # Salva variáveis para próximos jobs
+      echo "RISK_EXIT_CODE=$EXIT_CODE" >> risk-gate.env
+      echo "RISK_DECISION=$DECISION" >> risk-gate.env
+      echo "RISK_LEVEL=$RISK" >> risk-gate.env
+      
+      # Processa decisão
+      if [[ "$EXIT_CODE" == "2" ]]; then
+        echo "❌ Pipeline BLOQUEADO por política de risco"
+        if [[ "$RISK_GATE_FAIL_ON_BLOCK" == "true" ]]; then
+          exit 1
+        else
+          echo "⚠️ RISK_GATE_FAIL_ON_BLOCK=false, continuando com warning"
+        fi
+      elif [[ "$EXIT_CODE" == "1" ]]; then
+        echo "⚠️ Pipeline aprovado COM RESTRIÇÕES"
+      else
+        echo "✅ Pipeline APROVADO"
+      fi
+
+risk-gate:staging:
+  extends: .risk-gate-base
+  rules:
+    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "staging"'
+  variables:
+    RISK_ENVIRONMENT: "STAGING"
+  script:
+    - |
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "🔍 RISK GATE ANALYSIS (STAGING)"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "Repository: $CI_PROJECT_PATH"
+      echo "MR Number: $CI_MERGE_REQUEST_IID"
+      echo "Target Branch: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      echo ""
+      
+      # Determina tipo de mudança
+      MR_TITLE="$CI_MERGE_REQUEST_TITLE"
+      if [[ "$MR_TITLE" == hotfix:* || "$MR_TITLE" == fix:* ]]; then
+        CHANGE_TYPE="HOTFIX"
+      elif [[ "$MR_TITLE" == feat:* || "$MR_TITLE" == feature:* ]]; then
+        CHANGE_TYPE="FEATURE"
+      elif [[ "$MR_TITLE" == refactor:* ]]; then
+        CHANGE_TYPE="REFACTOR"
+      else
+        CHANGE_TYPE="FEATURE"
+      fi
+      
+      echo "Change Type: $CHANGE_TYPE"
+      echo ""
+      
+      # Chama API
+      HTTP_CODE=$(curl -s -w "%{http_code}" -o risk-gate-response.json \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $BACKOFFICE_ALERTA_TOKEN" \
+        -d "{
+          \"provider\": \"GITLAB\",
+          \"repositoryUrl\": \"$CI_PROJECT_URL\",
+          \"pullRequestNumber\": \"$CI_MERGE_REQUEST_IID\",
+          \"environment\": \"$RISK_ENVIRONMENT\",
+          \"changeType\": \"$CHANGE_TYPE\"
+        }" \
+        "$BACKOFFICE_ALERTA_URL/risk/ci/gate")
+      
+      if [[ "$HTTP_CODE" != "200" ]]; then
+        echo "❌ Erro ao chamar API: HTTP $HTTP_CODE"
+        exit 1
+      fi
+      
+      # Extrai e processa resposta
+      EXIT_CODE=$(jq -r '.exitCode' risk-gate-response.json)
+      DECISION=$(jq -r '.finalDecision' risk-gate-response.json)
+      RISK=$(jq -r '.overallRiskLevel' risk-gate-response.json)
+      SUMMARY=$(jq -r '.summary' risk-gate-response.json)
+      
+      echo "Decision: $DECISION"
+      echo "Risk Level: $RISK"
+      echo "Exit Code: $EXIT_CODE"
+      echo ""
+      echo "$SUMMARY"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      # Staging geralmente é mais permissivo
+      if [[ "$EXIT_CODE" == "2" ]]; then
+        echo "⚠️ Risco alto detectado em STAGING"
+        echo "⚠️ Recomenda-se revisão antes de merge"
+        # Não bloqueia em staging por padrão
+      elif [[ "$EXIT_CODE" == "1" ]]; then
+        echo "⚠️ Pipeline aprovado com restrições"
+      else
+        echo "✅ Pipeline aprovado"
+      fi
+
+# Job opcional: Comentar no MR (requer permissões)
+# risk-gate:comment:
+#   stage: risk-gate
+#   needs:
+#     - risk-gate:production
+#   rules:
+#     - if: '$CI_MERGE_REQUEST_IID && $GITLAB_API_TOKEN'
+#   script:
+#     - |
+#       DECISION=$(jq -r '.finalDecision' risk-gate-response.json)
+#       SUMMARY=$(jq -r '.summary' risk-gate-response.json)
+#       
+#       COMMENT="## 🔍 Risk Gate Analysis\n\n**Decision:** $DECISION\n\n$SUMMARY"
+#       
+#       curl -X POST \
+#         -H "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+#         -H "Content-Type: application/json" \
+#         -d "{\"body\": \"$COMMENT\"}" \
+#         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes"

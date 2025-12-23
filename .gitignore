@@ -1,0 +1,84 @@
+# Backend Java/Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.jar
+*.war
+*.ear
+*.log
+*.ctxt
+.mtj.tmp/
+hs_err_pid*
+
+# Maven
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.properties
+
+# Eclipse
+.settings/
+.classpath
+.project
+bin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Frontend Node
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# H2 Database (desenvolvimento)
+*.db
+*.trace.db
+
+# Sensitive data (nunca commitar)
+application-prod.properties
+application-secrets.properties
+*.key
+*.pem
+*.p12
+*.jks
+
+# Build outputs
+backoffice-alerta-*.jar
+
+# Local environment files (sensitive) - do not commit
+.env
+.env.*
+
+# Spring/Java local overrides
+src/main/resources/application.properties
+src/main/resources/application-secrets.properties

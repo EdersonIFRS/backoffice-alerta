@@ -1,0 +1,161 @@
+# US#73 - Profile Web (Ambiente Dockerizado)
+# Configuração para deploy em ambiente web com Docker
+
+spring:
+  application:
+    name: backoffice-alerta-web
+  
+  # PostgreSQL (não H2)
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/backoffice_alerta}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  
+  # JPA
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+        use_sql_comments: false
+        jdbc:
+          batch_size: 20
+        order_inserts: true
+        order_updates: true
+  
+  # Flyway
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  
+  # Security
+  security:
+    jwt:
+      secret: ${JWT_SECRET:change-me-in-production-minimum-256-bits-secret}
+      expiration: ${JWT_EXPIRATION:86400000}
+  
+  # CORS
+  web:
+    cors:
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost}
+      allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+      allowed-headers: "*"
+      allow-credentials: true
+      max-age: 3600
+
+# Logging (JSON format para observabilidade)
+logging:
+  level:
+    root: ${LOGGING_LEVEL_ROOT:INFO}
+    com.backoffice.alerta: ${LOGGING_LEVEL_COM_BACKOFFICE:DEBUG}
+    org.springframework.web: INFO
+    org.hibernate.SQL: WARN
+  pattern:
+    console: '{"timestamp":"%d{yyyy-MM-dd HH:mm:ss.SSS}","level":"%level","logger":"%logger{36}","thread":"%thread","message":"%msg","correlation_id":"%X{correlation_id}"}%n'
+
+# Actuator (Observabilidade)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+  metrics:
+    export:
+      simple:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: web
+  health:
+    defaults:
+      enabled: true
+    db:
+      enabled: true
+
+# Server
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-binding-errors: always
+    include-stacktrace: on_param
+    include-exception: false
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,application/javascript,application/json
+
+# Git Providers (US#51/52, US#68, US#72)
+git:
+  providers:
+    github:
+      token: ${GITHUB_TOKEN:}
+      api-url: https://api.github.com
+    gitlab:
+      token: ${GITLAB_TOKEN:}
+      api-url: https://gitlab.com/api/v4
+
+# Embeddings (US#65)
+embeddings:
+  provider: ${EMBEDDING_PROVIDER:sentence-transformer}
+  openai:
+    api-key: ${OPENAI_API_KEY:}
+    model: text-embedding-ada-002
+  sentence-transformer:
+    model: all-MiniLM-L6-v2
+
+# Vector DB (US#66) - PostgreSQL com pgvector
+vector-db:
+  type: postgresql
+  dimension: 384
+  metric: cosine
+
+# RAG Configuration (US#64, US#65, US#66)
+rag:
+  query-embedding-cache:
+    enabled: true
+    ttl-minutes: 30
+    max-entries: 1000
+  embedding:
+    provider: ${EMBEDDING_PROVIDER:sentence-transformer}
+    timeout-seconds: 15
+    enable-fallback: true
+  vector-store:
+    type: JPA
+    persist: true
+  llm:
+    provider: OPENAI
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      model: gpt-4o-mini
+      timeout-seconds: 15
+  code:
+    enabled: true  # ✅ FASE 1 HABILITADA PARA TESTES
+    index-on-onboarding: true
+    max-file-size-kb: 500  # Máximo 500KB por arquivo
+
+# Observabilidade
+observability:
+  correlation-id:
+    enabled: true
+    header-name: X-Correlation-ID
+  request-logging:
+    enabled: true
+    include-headers: false
+    include-payload: false

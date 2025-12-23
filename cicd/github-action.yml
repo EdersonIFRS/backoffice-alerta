@@ -1,0 +1,158 @@
+# US#53 - GitHub Action para Risk Gate
+# 
+# Esta Action valida Pull Requests usando o backoffice-alerta como gate de risco.
+#
+# Comportamento:
+# - exitCode 0 (APROVADO) → Pipeline continua
+# - exitCode 1 (APROVADO_COM_RESTRICOES) → Warning, pipeline continua
+# - exitCode 2 (BLOQUEADO) → Pipeline falha
+#
+# Configuração necessária:
+# 1. Secrets no GitHub:
+#    - BACKOFFICE_ALERTA_URL: URL da API (ex: https://alerta.company.com)
+#    - BACKOFFICE_ALERTA_TOKEN: JWT token para autenticação
+#    - GITHUB_TOKEN: Token do GitHub (já disponível automaticamente)
+#
+# 2. Variáveis de ambiente no backoffice-alerta:
+#    - GITHUB_TOKEN: Personal Access Token do GitHub (para leitura de PRs)
+
+name: Risk Gate - Backoffice Alerta
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - develop
+      - release/*
+
+jobs:
+  risk-gate:
+    name: Analyze Risk Impact
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get PR number
+        id: pr
+        run: |
+          echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+
+      - name: Determine environment
+        id: env
+        run: |
+          # Determina ambiente baseado na branch alvo
+          if [[ "${{ github.base_ref }}" == "main" ]]; then
+            echo "environment=PRODUCTION" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.base_ref }}" == "develop" ]]; then
+            echo "environment=STAGING" >> $GITHUB_OUTPUT
+          else
+            echo "environment=DEVELOPMENT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine change type
+        id: change
+        run: |
+          # Determina tipo de mudança baseado em labels ou título
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          
+          if [[ "$PR_TITLE" == hotfix:* || "$PR_TITLE" == fix:* ]]; then
+            echo "type=HOTFIX" >> $GITHUB_OUTPUT
+          elif [[ "$PR_TITLE" == feat:* || "$PR_TITLE" == feature:* ]]; then
+            echo "type=FEATURE" >> $GITHUB_OUTPUT
+          elif [[ "$PR_TITLE" == refactor:* ]]; then
+            echo "type=REFACTOR" >> $GITHUB_OUTPUT
+          else
+            echo "type=FEATURE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Call Risk Gate API
+        id: risk-gate
+        run: |
+          # Chama API do backoffice-alerta
+          RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.BACKOFFICE_ALERTA_TOKEN }}" \
+            -d '{
+              "provider": "GITHUB",
+              "repositoryUrl": "https://github.com/${{ steps.pr.outputs.repo }}",
+              "pullRequestNumber": "${{ steps.pr.outputs.number }}",
+              "environment": "${{ steps.env.outputs.environment }}",
+              "changeType": "${{ steps.change.outputs.type }}"
+            }' \
+            "${{ secrets.BACKOFFICE_ALERTA_URL }}/risk/ci/gate")
+          
+          echo "Response: $RESPONSE"
+          
+          # Extrai exitCode da resposta
+          EXIT_CODE=$(echo $RESPONSE | jq -r '.exitCode')
+          DECISION=$(echo $RESPONSE | jq -r '.finalDecision')
+          RISK=$(echo $RESPONSE | jq -r '.overallRiskLevel')
+          SUMMARY=$(echo $RESPONSE | jq -r '.summary')
+          
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "decision=$DECISION" >> $GITHUB_OUTPUT
+          echo "risk=$RISK" >> $GITHUB_OUTPUT
+          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+          
+          # Salva response completo para próximo step
+          echo "$RESPONSE" > risk-gate-response.json
+
+      - name: Process gate decision
+        run: |
+          EXIT_CODE="${{ steps.risk-gate.outputs.exit_code }}"
+          DECISION="${{ steps.risk-gate.outputs.decision }}"
+          RISK="${{ steps.risk-gate.outputs.risk }}"
+          SUMMARY="${{ steps.risk-gate.outputs.summary }}"
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔍 RISK GATE ANALYSIS"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Decision: $DECISION"
+          echo "Risk Level: $RISK"
+          echo "Exit Code: $EXIT_CODE"
+          echo ""
+          echo "Summary:"
+          echo "$SUMMARY"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Mostra ações requeridas se houver
+          ACTIONS=$(jq -r '.actionsRequired[]?' risk-gate-response.json 2>/dev/null || true)
+          if [[ -n "$ACTIONS" ]]; then
+            echo ""
+            echo "⚠️ Actions Required:"
+            echo "$ACTIONS" | while read line; do
+              echo "  - $line"
+            done
+          fi
+          
+          # Se exitCode == 2 (BLOQUEADO), falha o pipeline
+          if [[ "$EXIT_CODE" == "2" ]]; then
+            echo ""
+            echo "❌ Pipeline BLOQUEADO por política de risco"
+            exit 1
+          fi
+          
+          # Se exitCode == 1 (COM_RESTRICOES), apenas warning
+          if [[ "$EXIT_CODE" == "1" ]]; then
+            echo ""
+            echo "⚠️ Pipeline aprovado COM RESTRIÇÕES"
+            echo "::warning::$SUMMARY"
+          fi
+          
+          # Se exitCode == 0 (APROVADO), sucesso
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            echo ""
+            echo "✅ Pipeline APROVADO"
+          fi
+
+      - name: Upload risk report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risk-gate-report
+          path: risk-gate-response.json
+          retention-days: 30

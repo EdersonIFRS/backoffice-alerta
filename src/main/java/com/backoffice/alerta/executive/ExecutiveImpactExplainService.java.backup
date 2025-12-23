@@ -1,0 +1,452 @@
+package com.backoffice.alerta.executive;
+
+import com.backoffice.alerta.dto.BusinessImpactGraphResponse;
+import com.backoffice.alerta.dto.BusinessImpactRequest;
+import com.backoffice.alerta.dto.ImpactGraphNodeResponse;
+import com.backoffice.alerta.dto.ImpactGraphNodeResponse.ImpactLevel;
+import com.backoffice.alerta.rules.*;
+import com.backoffice.alerta.service.BusinessImpactGraphService;
+import com.backoffice.alerta.repository.BusinessRuleIncidentRepository;
+import com.backoffice.alerta.repository.BusinessRuleOwnershipRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Service para geração de explicação executiva de impacto sistêmico
+ * 
+ * US#38 - Explicação Executiva Inteligente
+ * 
+ * IMPORTANTE - Regras de Governança:
+ * ❌ NÃO recalcular risco
+ * ❌ NÃO persistir dados
+ * ❌ NÃO criar auditoria
+ * ❌ NÃO criar SLA
+ * ❌ NÃO enviar notificações
+ * ❌ NÃO modificar entidades
+ * 
+ * ✅ Read-only
+ * ✅ Determinístico
+ * ✅ Consultivo
+ */
+@Service
+public class ExecutiveImpactExplainService {
+    
+    private static final Logger log = LoggerFactory.getLogger(ExecutiveImpactExplainService.class);
+    
+    private final BusinessImpactGraphService graphService;
+    private final BusinessRuleIncidentRepository incidentRepository;
+    private final BusinessRuleOwnershipRepository ownershipRepository;
+    
+    public ExecutiveImpactExplainService(BusinessImpactGraphService graphService,
+                                        BusinessRuleIncidentRepository incidentRepository,
+                                        BusinessRuleOwnershipRepository ownershipRepository) {
+        this.graphService = graphService;
+        this.incidentRepository = incidentRepository;
+        this.ownershipRepository = ownershipRepository;
+    }
+    
+    /**
+     * Gera explicação executiva do impacto sistêmico
+     * 
+     * Interpreta dados existentes sem alterar estado do sistema.
+     */
+    public ExecutiveImpactExplainResponse generateExplanation(ExecutiveImpactExplainRequest request) {
+        log.info("Gerando explicação executiva para PR {} (ambiente: {}, tipo: {}, foco: {})",
+                request.getPullRequestId(), request.getEnvironment(), 
+                request.getChangeType(), request.getFocus());
+        
+        // Obter grafo de impacto (reutiliza US#37)
+        BusinessImpactRequest graphRequest = new BusinessImpactRequest(
+                request.getPullRequestId(), 
+                Collections.emptyList() // Usar mapeamentos existentes
+        );
+        BusinessImpactGraphResponse graph = graphService.generateImpactGraph(graphRequest);
+        
+        // Calcular nível de risco geral
+        RiskLevel overallRisk = calculateOverallRisk(graph, request.getEnvironment());
+        
+        // Calcular nível de confiança
+        ConfidenceLevel confidence = calculateConfidence(graph);
+        
+        // Gerar sumário executivo
+        ExecutiveSummary summary = buildExecutiveSummary(graph, request, overallRisk);
+        
+        log.info("Explicação executiva gerada - Risco: {}, Confiança: {}, Regras: {}",
+                overallRisk, confidence, graph.getNodes().size());
+        
+        return new ExecutiveImpactExplainResponse(
+                request.getPullRequestId(),
+                overallRisk,
+                summary,
+                confidence,
+                Instant.now()
+        );
+    }
+    
+    /**
+     * Calcula nível de risco geral baseado no grafo e ambiente
+     */
+    private RiskLevel calculateOverallRisk(BusinessImpactGraphResponse graph, Environment environment) {
+        List<ImpactGraphNodeResponse> nodes = graph.getNodes();
+        
+        if (nodes.isEmpty()) {
+            return RiskLevel.LOW;
+        }
+        
+        // Verifica presença de regras críticas
+        boolean hasCritical = nodes.stream()
+                .anyMatch(n -> n.getCriticality() == Criticality.CRITICA);
+        
+        // Verifica impacto em cascata
+        boolean hasCascade = nodes.stream()
+                .anyMatch(n -> n.getImpactLevel() == ImpactLevel.CASCADE);
+        
+        // Verifica regras com incidentes
+        boolean hasIncidents = nodes.stream()
+                .anyMatch(ImpactGraphNodeResponse::isHasIncidents);
+        
+        // Lógica determinística
+        if (environment == Environment.PRODUCTION) {
+            if (hasCritical && hasCascade) {
+                return RiskLevel.CRITICAL;
+            }
+            if (hasCritical || hasCascade || hasIncidents) {
+                return RiskLevel.HIGH;
+            }
+            return RiskLevel.MEDIUM;
+        } else if (environment == Environment.STAGING) {
+            if (hasCritical && hasCascade) {
+                return RiskLevel.HIGH;
+            }
+            if (hasCritical || hasCascade) {
+                return RiskLevel.MEDIUM;
+            }
+            return RiskLevel.LOW;
+        } else { // DEV
+            if (hasCritical && hasCascade && hasIncidents) {
+                return RiskLevel.MEDIUM;
+            }
+            return RiskLevel.LOW;
+        }
+    }
+    
+    /**
+     * Calcula nível de confiança baseado na completude dos dados
+     */
+    private ConfidenceLevel calculateConfidence(BusinessImpactGraphResponse graph) {
+        int score = 0;
+        
+        // +1 por ter regras impactadas
+        if (!graph.getNodes().isEmpty()) score++;
+        
+        // +1 por ter dependências mapeadas
+        if (!graph.getEdges().isEmpty()) score++;
+        
+        // +1 por ter ownerships mapeados
+        long nodesWithOwnership = graph.getNodes().stream()
+                .filter(n -> n.getOwnerships() != null && !n.getOwnerships().isEmpty())
+                .count();
+        if (nodesWithOwnership > 0) score++;
+        
+        // +1 por ter contexto histórico (incidentes)
+        long nodesWithIncidents = graph.getNodes().stream()
+                .filter(ImpactGraphNodeResponse::isHasIncidents)
+                .count();
+        if (nodesWithIncidents > 0) score++;
+        
+        // +1 por ter múltiplos níveis de impacto
+        Set<ImpactLevel> levels = graph.getNodes().stream()
+                .map(ImpactGraphNodeResponse::getImpactLevel)
+                .collect(Collectors.toSet());
+        if (levels.size() > 1) score++;
+        
+        // Classificação
+        if (score >= 4) return ConfidenceLevel.HIGH;
+        if (score >= 2) return ConfidenceLevel.MEDIUM;
+        return ConfidenceLevel.LOW;
+    }
+    
+    /**
+     * Constrói sumário executivo em linguagem de negócio
+     */
+    private ExecutiveSummary buildExecutiveSummary(BusinessImpactGraphResponse graph,
+                                                   ExecutiveImpactExplainRequest request,
+                                                   RiskLevel overallRisk) {
+        String headline = buildHeadline(graph, request);
+        String businessImpact = buildBusinessImpact(graph, request);
+        List<String> areasAffected = buildAreasAffected(graph);
+        String historicalContext = buildHistoricalContext(graph);
+        String riskInterpretation = buildRiskInterpretation(graph, request, overallRisk);
+        String recommendation = buildRecommendation(graph, request, overallRisk);
+        
+        return new ExecutiveSummary(
+                headline,
+                businessImpact,
+                areasAffected,
+                historicalContext,
+                riskInterpretation,
+                recommendation
+        );
+    }
+    
+    /**
+     * Gera headline executivo
+     */
+    private String buildHeadline(BusinessImpactGraphResponse graph, ExecutiveImpactExplainRequest request) {
+        StringBuilder headline = new StringBuilder();
+        
+        // Mencionar ambiente se PRODUCTION
+        if (request.getEnvironment() == Environment.PRODUCTION) {
+            headline.append("Mudança em PRODUÇÃO: ");
+        } else {
+            headline.append("Mudança em ").append(request.getEnvironment()).append(": ");
+        }
+        
+        // Mencionar impacto CASCADE
+        long cascadeCount = graph.getNodes().stream()
+                .filter(n -> n.getImpactLevel() == ImpactLevel.CASCADE)
+                .count();
+        if (cascadeCount > 0) {
+            headline.append("impacto em cascata detectado (")
+                    .append(cascadeCount)
+                    .append(cascadeCount == 1 ? " regra afetada)" : " regras afetadas)");
+        } else {
+            headline.append(graph.getNodes().size())
+                    .append(graph.getNodes().size() == 1 ? " regra impactada" : " regras impactadas");
+        }
+        
+        // Mencionar regra CRÍTICA
+        boolean hasCritical = graph.getNodes().stream()
+                .anyMatch(n -> n.getCriticality() == Criticality.CRITICA);
+        if (hasCritical) {
+            headline.append(", incluindo regra crítica");
+        }
+        
+        return headline.toString();
+    }
+    
+    /**
+     * Traduz impacto técnico para efeito de negócio
+     */
+    private String buildBusinessImpact(BusinessImpactGraphResponse graph, ExecutiveImpactExplainRequest request) {
+        Set<Domain> domains = graph.getNodes().stream()
+                .map(ImpactGraphNode::getDomain)
+                .collect(Collectors.toSet());
+        
+        StringBuilder impact = new StringBuilder();
+        impact.append("Esta mudança afeta diretamente ");
+        
+        List<String> businessAreas = new ArrayList<>();
+        
+        for (Domain domain : domains) {
+            switch (domain) {
+                case PAYMENT:
+                    businessAreas.add("processamento de pagamentos");
+                    break;
+                case BILLING:
+                    businessAreas.add("faturamento e cobrança");
+                    break;
+                case USER:
+                    businessAreas.add("gestão de usuários");
+                    break;
+                case SECURITY:
+                    businessAreas.add("segurança e conformidade");
+                    break;
+                case INFRASTRUCTURE:
+                    businessAreas.add("infraestrutura e disponibilidade");
+                    break;
+                case INTEGRATION:
+                    businessAreas.add("integrações com sistemas externos");
+                    break;
+                case REPORTING:
+                    businessAreas.add("relatórios e analytics");
+                    break;
+                case COMPLIANCE:
+                    businessAreas.add("conformidade regulatória");
+                    break;
+            }
+        }
+        
+        if (businessAreas.isEmpty()) {
+            impact.append("operações gerais do sistema");
+        } else {
+            impact.append(String.join(", ", businessAreas));
+        }
+        
+        impact.append(". ");
+        
+        // Adicionar contexto do tipo de mudança
+        switch (request.getChangeType()) {
+            case HOTFIX:
+                impact.append("Hotfix requer atenção especial devido à urgência e potencial para efeitos colaterais.");
+                break;
+            case FEATURE:
+                impact.append("Nova funcionalidade pode introduzir comportamentos não previstos em fluxos existentes.");
+                break;
+            case REFACTOR:
+                impact.append("Refatoração pode afetar estabilidade de componentes dependentes.");
+                break;
+            case CONFIG:
+                impact.append("Mudança de configuração tem efeito imediato sem necessidade de redeploy.");
+                break;
+        }
+        
+        return impact.toString();
+    }
+    
+    /**
+     * Lista áreas afetadas baseadas em ownership
+     */
+    private String buildAreasAffected(BusinessImpactGraphResponse graph) {
+        Set<String> areas = new LinkedHashSet<>();
+        
+        for (ImpactGraphNodeResponse node : graph.getNodes()) {
+            // Adicionar domínio
+            areas.add(node.getDomain().toString());
+            
+            // Adicionar times responsáveis
+            if (node.getOwnerships() != null) {
+                node.getOwnerships().stream()
+                        .map(o -> o.getTeamName() + " (" + o.getTeamType() + ")")
+                        .forEach(areas::add);
+            }
+        }
+        
+        return new ArrayList<>(areas);
+    }
+    
+    /**
+     * Gera contexto histórico baseado em incidentes
+     */
+    private String buildHistoricalContext(BusinessImpactGraphResponse graph) {
+        long incidentCount = graph.getNodes().stream()
+                .filter(ImpactGraphNodeResponse::isHasIncidents)
+                .count();
+        
+        if (incidentCount == 0) {
+            return "Sem histórico relevante de incidentes nas regras impactadas. " +
+                   "Isso indica estabilidade histórica, mas não elimina riscos de novas mudanças.";
+        }
+        
+        // Obter severidade dos incidentes (simulado - em produção consultaria o repository)
+        return String.format(
+                "Histórico mostra %d %s com incidentes prévios. " +
+                "Recomenda-se cautela extra e monitoramento intensivo pós-deploy.",
+                incidentCount,
+                incidentCount == 1 ? "regra" : "regras"
+        );
+    }
+    
+    /**
+     * Interpreta risco em termos financeiro, operacional e reputacional
+     */
+    private String buildRiskInterpretation(BusinessImpactGraphResponse graph,
+                                          ExecutiveImpactExplainRequest request,
+                                          RiskLevel overallRisk) {
+        StringBuilder interpretation = new StringBuilder();
+        
+        interpretation.append("Risco ").append(overallRisk).append(" identificado. ");
+        
+        // Interpretação por nível de risco
+        switch (overallRisk) {
+            case CRITICAL:
+                interpretation.append("IMPACTO CRÍTICO: ");
+                interpretation.append("Risco financeiro alto devido a possível indisponibilidade de sistemas essenciais. ");
+                interpretation.append("Risco operacional severo com potencial paralisação de processos core. ");
+                interpretation.append("Risco reputacional significativo em caso de falha visível aos clientes.");
+                break;
+            case HIGH:
+                interpretation.append("IMPACTO ALTO: ");
+                interpretation.append("Risco financeiro moderado com possível degradação de performance. ");
+                interpretation.append("Risco operacional considerável em fluxos críticos. ");
+                interpretation.append("Risco reputacional presente se falha atingir usuários finais.");
+                break;
+            case MEDIUM:
+                interpretation.append("IMPACTO MÉDIO: ");
+                interpretation.append("Risco financeiro limitado a cenários específicos. ");
+                interpretation.append("Risco operacional gerenciável com monitoramento adequado. ");
+                interpretation.append("Risco reputacional baixo, impacto provavelmente interno.");
+                break;
+            case LOW:
+                interpretation.append("IMPACTO BAIXO: ");
+                interpretation.append("Risco financeiro mínimo. ");
+                interpretation.append("Risco operacional negligível. ");
+                interpretation.append("Risco reputacional irrelevante.");
+                break;
+        }
+        
+        // Adicionar contexto de ambiente
+        if (request.getEnvironment() == Environment.PRODUCTION) {
+            interpretation.append(" ATENÇÃO: Ambiente de produção amplifica todos os riscos.");
+        }
+        
+        return interpretation.toString();
+    }
+    
+    /**
+     * Gera recomendações baseadas no contexto
+     */
+    private String buildRecommendation(BusinessImpactGraphResponse graph,
+                                       ExecutiveImpactExplainRequest request,
+                                       RiskLevel overallRisk) {
+        List<String> recommendations = new ArrayList<>();
+        
+        // Recomendações por nível de risco
+        switch (overallRisk) {
+            case CRITICAL:
+                recommendations.add("Realizar revisão cruzada com pelo menos 2 senior engineers de times diferentes");
+                recommendations.add("Agendar deploy fora do horário comercial com equipe de plantão disponível");
+                recommendations.add("Implementar feature flag para rollback instantâneo sem redeploy");
+                recommendations.add("Executar testes de carga e stress antes do deploy");
+                recommendations.add("Monitoramento em tempo real por no mínimo 4 horas pós-deploy");
+                recommendations.add("Plano de comunicação preparado para stakeholders e clientes");
+                break;
+            case HIGH:
+                recommendations.add("Revisão cruzada entre times impactados obrigatória");
+                recommendations.add("Deploy em horário de baixo tráfego recomendado");
+                recommendations.add("Testes de integração completos em ambiente de staging");
+                recommendations.add("Monitoramento intensivo por 2 horas pós-deploy");
+                recommendations.add("Plano de rollback documentado e testado");
+                break;
+            case MEDIUM:
+                recommendations.add("Aprovação de pelo menos 1 senior engineer necessária");
+                recommendations.add("Testes de integração nos fluxos impactados");
+                recommendations.add("Monitoramento padrão por 1 hora pós-deploy");
+                recommendations.add("Documentação de mudanças atualizada");
+                break;
+            case LOW:
+                recommendations.add("Revisão de código padrão suficiente");
+                recommendations.add("Testes unitários e de integração básicos");
+                recommendations.add("Deploy pode seguir processo normal");
+                break;
+        }
+        
+        // Recomendações por tipo de mudança
+        if (request.getChangeType() == ChangeType.HOTFIX) {
+            recommendations.add("HOTFIX: Garantir que a correção não introduz novos problemas");
+            recommendations.add("Considerar backport para branches de manutenção se aplicável");
+        }
+        
+        // Recomendações por impacto em cascata
+        long cascadeCount = graph.getNodes().stream()
+                .filter(n -> n.getImpactLevel() == ImpactLevel.CASCADE)
+                .count();
+        if (cascadeCount > 0) {
+            recommendations.add("Impacto em cascata detectado: validar comportamento de todas as regras dependentes");
+        }
+        
+        // Recomendações por incidentes históricos
+        boolean hasIncidents = graph.getNodes().stream()
+                .anyMatch(ImpactGraphNodeResponse::isHasIncidents);
+        if (hasIncidents) {
+            recommendations.add("Regras com histórico de incidentes: revisar root causes anteriores antes do deploy");
+        }
+        
+        return String.join("; ", recommendations) + ".";
+    }
+}
