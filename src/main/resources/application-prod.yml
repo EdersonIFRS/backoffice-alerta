@@ -1,17 +1,11 @@
 # Configuração de produção - PostgreSQL
 spring:
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/backoffice_alerta}
-    username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
-    hikari:
-      maximum-pool-size: 20
-      minimum-idle: 5
-      connection-timeout: 30000
-      idle-timeout: 600000
-      max-lifetime: 1800000
-  
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
