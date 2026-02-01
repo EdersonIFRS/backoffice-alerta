@@ -29,17 +29,7 @@ export const HistoricalComparison: React.FC = () => {
         err.response?.data?.message || 
         'Erro ao comparar com histórico. Verifique se o Pull Request existe.'
       );
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleReset = () => {
-    setData(null);
-    setError('');
-  };
-
+      s
   return (
     <Box>
       <Box sx={{ mb: 3 }}>
