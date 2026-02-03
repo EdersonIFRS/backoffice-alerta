@@ -8,18 +8,7 @@ import {
   Card,
   CardContent,
   CircularProgress,
-  Alert,
-  List,
-  ListItem,
-  ListItemText,
-  Chip
-} from '@mui/material';
-import { TrendingUp, TrendingDown, TrendingFlat } from '@mui/icons-material';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { metricsApi } from '../services/api';
-import type { RiskMetrics } from '../types';
 
-export const Metrics: React.FC = () => {
   const [metrics, setMetrics] = useState<RiskMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -30,16 +19,10 @@ export const Metrics: React.FC = () => {
       const data = await metricsApi.get();
       setMetrics(data);
       setError('');
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Erro ao carregar métricas');
-    } finally {
-      setLoading(false);
-    }
+ 
   };
 
   useEffect(() => {
-    loadMetrics();
-  }, []);
 
   if (loading) {
     return (
